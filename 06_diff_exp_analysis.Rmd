@@ -20,7 +20,7 @@ library(openxlsx)
 
 library(knitr)
 
-path <- "F:/Drive/Misc/RNAseq/THP1/"
+path <- "L:/My Drive/Misc/RNAseq/THP1"
 
 ```
 
