@@ -1,0 +1,515 @@
+---
+title: "THP1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r lib, echo=TRUE, results='hide', message=F, warning=F, include=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(EnhancedVolcano)
+library(grid)
+library(gridExtra)
+library(gridGraphics)
+library(magrittr)
+library(openxlsx)
+
+library(knitr)
+
+path <- "F:/Drive/Misc/RNAseq/THP1/"
+
+```
+
+## Meta data setup and load counts
+
+Load table of counts per gene from featureCount output and meta data. 
+
+```{r files}
+#load counts, clean up column names
+counts <- read.table(file.path(path,"Data/counts"), header=T)
+gene_info <- counts[,1:6]
+counts <- counts[,7:ncol(counts)]
+names(counts) <- gsub('.*\\STAR.Sample_|\\.Aligned.*','',names(counts))
+names(counts) <- gsub('\\.','_',names(counts))
+rownames(counts) <- gene_info$Geneid
+
+#load meta data
+meta <- read.xlsx(file.path(path,"Data/THP experiment sample IDs.xlsx"))
+meta$id <- gsub('-','_',meta$Sample.ID)
+
+#treatment factors formating
+meta$treat <- ifelse(meta$Treatment=="DCVC+LPS", "DCVC_LPS", meta$Treatment)
+meta$treat <- factor(meta$treat)
+
+#match order
+counts <- counts[,match(meta$id, colnames(counts))]
+
+
+
+#gene info
+library(biomaRt)
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+ens.names <- rownames(counts)
+ens.names <- gsub('\\..*','',ens.names)
+genes <- getBM(
+  filters="ensembl_gene_id",
+  attributes=c("ensembl_gene_id","entrezgene_id","hgnc_symbol","chromosome_name","start_position","end_position"),
+  values=ens.names,
+  mart=mart)
+genes.ord <- genes[match(genes$ensembl_gene_id,ens.names),]
+genes.ord.uni <- genes.ord[!duplicated(genes.ord$ensembl_gene_id),]
+
+#use feature counts output as base, add info
+rownames(gene_info) <- gene_info$Geneid
+gene_info$Geneid <- gsub('\\..*','',gene_info$Geneid)
+gene_info$Row.names <- rownames(gene_info)
+gene_info <- merge(gene_info,genes.ord.uni,by.x='Geneid',by.y='ensembl_gene_id',all.x=T,all.y=F)
+rownames(gene_info) <- gene_info$Row.names
+gene_info <- gene_info[rownames(counts),]
+gene_info <- gene_info[,c('Geneid','entrezgene_id','hgnc_symbol','chromosome_name','start_position','end_position','Chr','Start','End','Strand')]
+names(gene_info)[1] <- 'ensembl_gene_id'
+
+head(gene_info)
+
+save(gene_info, counts, meta, file=file.path(path,'Data/count_data.RDA'))
+```
+
+
+## Loading into DESeq2
+
+```{r}
+
+load(file.path(path,'Data/count_data.RDA'))
+
+#make deseq object
+deseq.ds <- DESeqDataSetFromMatrix(countData = counts,
+                                    colData = meta,
+                                    design = ~ treat)
+```
+
+
+## Construct Descriptive Table
+
+Table with columns: id, treatment, number reads, number genes
+
+```{r}
+tab1 <- meta[,c("id", "Treatment")]
+
+summ <- read.table(file.path(path,"Data/counts.summary"), header=T)
+
+#get number reads
+names(summ) <- gsub('.*\\STAR.Sample_|\\.Aligned.*','',names(summ))
+names(summ) <- gsub('\\.','_',names(summ))
+rownames(summ) <- summ[,1]
+summ <- summ[,-1]
+
+reads <- summ[1,]
+reads <- reads[tab1$id]
+tab1$reads <- as.numeric(reads)
+
+#compute n genes from counts
+n_genes <- colSums(counts(deseq.ds)>0)
+identical(names(n_genes),tab1$id)
+tab1$genes <- n_genes
+
+summary(aov(reads~Treatment,data=tab1))
+summary(aov(genes~Treatment,data=tab1))
+
+
+tab1$id <- gsub('_','-',tab1$id)
+write.csv(tab1, file=file.path(path,"Results/descriptives_table.csv"), row.names=F, quote=F)
+```
+
+
+## PCA Plot
+
+
+```{r}
+#PCA plot
+vsd <- vst(deseq.ds)
+
+plotPCA(vsd, "treat")
+
+pcs <- plotPCA(vsd, "treat", returnData=TRUE)
+
+pca.treat <- ggplot(pcs, aes(x=PC1, y=PC2, col=treat)) + 
+  scale_color_discrete(name='Treatment', labels=c('Control','DCVC','DCVC+LPS','LPS')) +
+  theme(axis.text=element_text(size=16),
+        axis.title=element_text(size=18),
+        legend.title=element_text(size=14),
+        legend.text=element_text(size=12),
+        panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.line = element_line(size=0.5)) +
+  geom_point(size=3.1, stroke=1.1, shape=1) +
+  xlab("PC1: 78% variance") + ylab("PC2: 16% variance")
+
+
+
+pca.treat
+
+ggsave(pca.treat, file=file.path(path,"Results/PC_plot.png"))
+
+```
+
+## Fit models
+
+```{r model}
+#fit model
+res <- DESeq(deseq.ds)
+
+deseq.ds.lps <- deseq.ds
+deseq.ds.lps$treat <- relevel(deseq.ds.lps$treat,'LPS')
+res.lps <- DESeq(deseq.ds.lps)
+
+deseq.ds.dcvc <- deseq.ds
+deseq.ds.dcvc$treat <- relevel(deseq.ds.dcvc$treat,'DCVC')
+res.dcvc <- DESeq(deseq.ds.dcvc)
+
+#use this function to list out the coefficients
+resultsNames(res)
+resultsNames(res.lps)
+resultsNames(res.dcvc)
+
+#get results
+res.DCVC <- results(res, name="treat_DCVC_vs_Control")
+res.LPS <- results(res, name="treat_LPS_vs_Control")
+res.DCVC_LPS <- results(res, name="treat_DCVC_LPS_vs_Control")
+res.DCVCl <- results(res.lps, name="treat_DCVC_LPS_vs_LPS")
+res.LPSd <- results(res.dcvc, name="treat_DCVC_LPS_vs_DCVC")
+
+summary(res.DCVC)
+summary(res.LPS)
+summary(res.DCVC_LPS)
+summary(res.DCVCl)
+summary(res.LPSd)
+
+#logFC shrinkage
+shrink.DCVC <- lfcShrink(res, coef="treat_DCVC_vs_Control", res=res.DCVC, type='apeglm')
+shrink.LPS <- lfcShrink(res, coef="treat_LPS_vs_Control", res=res.LPS, type='apeglm')
+shrink.DCVC_LPS <- lfcShrink(res, coef="treat_DCVC_LPS_vs_Control", res=res.DCVC_LPS, type='apeglm')
+shrink.DCVCl <- lfcShrink(res.lps, coef="treat_DCVC_LPS_vs_LPS", res=res.DCVCl, type='apeglm')
+shrink.LPSd <- lfcShrink(res.dcvc, coef="treat_DCVC_LPS_vs_DCVC", res=res.LPSd, type='apeglm')
+
+#order and filter
+clean.tab <- function(tab){
+  tab <- tab[!is.na(tab$padj),]
+  tab <- tab[order(tab$padj),]
+  tab$gene <- ifelse(is.na(gene_info[rownames(tab),'hgnc_symbol']) | gene_info[rownames(tab),'hgnc_symbol']=="",
+                    gene_info[rownames(tab),'ensembl_gene_id'],
+                    paste0(" ",gene_info[rownames(tab),'hgnc_symbol']))
+  tab[,c('gene','baseMean','log2FoldChange','lfcSE','pvalue','padj')]
+}
+
+shrink.DCVC <- clean.tab(shrink.DCVC)
+shrink.LPS <- clean.tab(shrink.LPS)
+shrink.DCVC_LPS <- clean.tab(shrink.DCVC_LPS)
+shrink.DCVCl <- clean.tab(shrink.DCVCl)
+shrink.LPSd <- clean.tab(shrink.LPSd)
+
+#write tables
+write.csv(shrink.DCVC, row.names=F, file=file.path(path,'/Results/DE genes DCVC v Control.csv'))
+write.csv(shrink.LPS, row.names=F, file=file.path(path,'/Results/DE genes LPS v Control.csv'))
+write.csv(shrink.DCVC_LPS, row.names=F, file=file.path(path,'/Results/DE genes DCVC+LPS v Control.csv'))
+write.csv(shrink.DCVCl, row.names=F, file=file.path(path,'/Results/DE genes DCVC+LPS v LPS.csv'))
+write.csv(shrink.LPSd, row.names=F, file=file.path(path,'/Results/DE genes DCVC+LPS v DCVC.csv'))
+
+```
+
+
+## Volcano Plots
+```{r volcano}
+shrink.DCVC <- read.csv(file.path(path,'/Results/DE genes DCVC v Control.csv'))
+shrink.LPS <- read.csv(file.path(path,'/Results/DE genes LPS v Control.csv'))
+shrink.DCVC_LPS <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v Control.csv'))
+shrink.DCVCl <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v LPS.csv'))
+shrink.LPSd <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v DCVC.csv'))
+
+
+
+EnhancedVolcano(shrink.DCVC, 
+                title='DCVC vs Control',
+                subtitle='',
+                caption='',
+                subtitleLabSize=1,
+                captionLabSize=1,
+                lab=NA, 
+                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                x='log2FoldChange',
+                y='padj',
+                ylab = bquote(~-Log[10]~adjusted~italic(P)),
+                xlim = c(-10,20),
+                ylim = c(0,315),
+                pCutoff=0.05,
+                FCcutoff=2.5,
+                colAlpha = 1) +
+  theme(legend.position = "none")
+
+
+EnhancedVolcano(shrink.LPS, 
+                title='LPS vs Control',
+                subtitle='',
+                caption='',
+                subtitleLabSize=1,
+                captionLabSize=1,
+                lab=NA, 
+                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                x='log2FoldChange',
+                y='padj',
+                ylab = bquote(~-Log[10]~adjusted~italic(P)),
+                xlim = c(-10,20),
+                ylim = c(0,315),
+                pCutoff=0.05,
+                FCcutoff=2.5,
+                colAlpha = 1) +
+  theme(legend.position = "none")
+
+EnhancedVolcano(shrink.DCVC_LPS, 
+                title='DCVC+LPS vs Control',
+                subtitle='',
+                caption='',
+                subtitleLabSize=1,
+                captionLabSize=1,
+                lab=NA, 
+                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                x='log2FoldChange',
+                y='padj',
+                ylab = bquote(~-Log[10]~adjusted~italic(P)),
+                xlim = c(-10,20),
+                ylim = c(0,315),
+                pCutoff=0.05,
+                FCcutoff=2.5,
+                colAlpha = 1) +
+  theme(legend.position = "none")
+
+EnhancedVolcano(shrink.DCVCl, 
+                title='DCVC+LPS vs LPS',
+                subtitle='',
+                caption='',
+                subtitleLabSize=1,
+                captionLabSize=1,
+                lab=NA, 
+                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                x='log2FoldChange',
+                y='padj',
+                ylab = bquote(~-Log[10]~adjusted~italic(P)),
+                xlim = c(-10,20),
+                ylim = c(0,315),
+                pCutoff=0.05,
+                FCcutoff=2.5,
+                colAlpha = 1) +
+  theme(legend.position = "none")
+
+# EnhancedVolcano(shrink.LPSd, 
+#                 title='DCVC+LPS vs DCVC',
+#                 subtitle='',
+#                 caption='',
+#                 subtitleLabSize=1,
+#                 captionLabSize=1,
+#                 lab=NA, 
+#                 #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+#                 x='log2FoldChange',
+#                 y='padj',
+#                 ylab = bquote(~-Log[10]~adjusted~italic(P)),
+#                 xlim = c(-10,20),
+#                 ylim = c(0,315),
+#                 pCutoff=0.05,
+#                 FCcutoff=2.5,
+#                 colAlpha = 1) +
+#   theme(legend.position = "none")
+
+```
+
+
+
+```{r corrs}
+library(corrplot)
+
+common <- Reduce(intersect, list(rownames(shrink.DCVC),rownames(shrink.LPS),rownames(shrink.DCVC_LPS),rownames(shrink.DCVCl),rownames(shrink.LPSd)))
+
+comp.DCVC <- shrink.DCVC[common,]
+comp.LPS <- shrink.LPS[common,]
+comp.DCVC_LPS <- shrink.DCVC_LPS[common,]
+comp.DCVCl <- shrink.DCVCl[common,]
+comp.LPSd <- shrink.LPSd[common,]
+
+M <- cor(data.frame(DCVC_v_Con=comp.DCVC$log2FoldChange,
+                    LPS_v_Con=comp.LPS$log2FoldChange,
+                    DCVCLPS_v_Con=comp.DCVC_LPS$log2FoldChange,
+                    DCVCLPS_v_LPS=comp.DCVCl$log2FoldChange,
+                    DCVCLPS_V_DCVC=comp.LPSd$log2FoldChange))
+
+pdf(file.path(path,'Results/correlation.pdf'))
+corrplot(M, method='ellipse', type='upper', diag=F, addCoef.col='black')
+dev.off()
+
+
+```
+
+
+```{r LRpath}
+load(file.path(path,'Data/count_data.RDA'))
+deseq.ds <- DESeqDataSetFromMatrix(countData = counts,
+                                    colData = meta,
+                                    design = ~ treat)
+deseq.res <- DESeq(deseq.ds)
+
+de.dcvc_con <- read.csv(file.path(path,'/Results/DE genes DCVC v Control.csv'), header=T)
+de.lps_con <- read.csv(file.path(path,'/Results/DE genes LPS v Control.csv'), header=T)
+de.dcvclps_con <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v Control.csv'), header=T)
+de.dcvclps_lps <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v LPS.csv'), header=T)
+de.dcvclps_dcvc <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v DCVC.csv'), header=T)
+
+### write input files for LR path according to instructions for RNAenrich
+norm.counts <- counts(deseq.res, normalized=T)
+meta$Sample.ID <- gsub('-','_',meta$Sample.ID)
+
+#DCVC v control
+dcvc.gene <- gene_info[match(de.dcvc_con$gene, gene_info$hgnc_symbol),]
+dcvc.counts <- norm.counts[match(rownames(dcvc.gene),rownames(norm.counts)),]
+dcvc.counts <- dcvc.counts[,colnames(dcvc.counts) %in% meta[meta$treat %in% c('DCVC','Control'),'Sample.ID']]
+dcvc.LR <- data.frame(geneid=dcvc.gene$entrezgene_id,
+                        PValue=de.dcvc_con$pvalue,
+                        logFC=de.dcvc_con$log2FoldChange,
+                        norm_avg_readcount=rowMeans(dcvc.counts))
+dcvc.LR <- dcvc.LR[!is.na(dcvc.LR$geneid),]
+dcvc.LR <- dcvc.LR[order(dcvc.LR$PValue),]
+write.table(dcvc.LR, sep="\t", row.names=FALSE, quote=FALSE, file=file.path(path,"Data/LRpath/dcvc_con_LR_input.txt"))
+
+#LPS v control
+lps.gene <- gene_info[match(de.lps_con$gene, gene_info$hgnc_symbol),]
+lps.counts <- norm.counts[match(rownames(lps.gene),rownames(norm.counts)),]
+lps.counts <- lps.counts[,colnames(lps.counts) %in% meta[meta$treat %in% c('LPS','Control'),'Sample.ID']]
+lps.LR <- data.frame(geneid=lps.gene$entrezgene_id,
+                        PValue=de.lps_con$pvalue,
+                        logFC=de.lps_con$log2FoldChange,
+                        norm_avg_readcount=rowMeans(lps.counts))
+lps.LR <- lps.LR[!is.na(lps.LR$geneid),]
+lps.LR <- lps.LR[order(lps.LR$PValue),]
+write.table(lps.LR, sep="\t", row.names=FALSE, quote=FALSE, file=file.path(path,"Data/LRpath/lps_con_LR_input.txt"))
+
+#DCVC+LPS v control
+dcvclps.gene <- gene_info[match(de.dcvclps_con$gene, gene_info$hgnc_symbol),]
+dcvclps.counts <- norm.counts[match(rownames(dcvclps.gene),rownames(norm.counts)),]
+dcvclps.counts <- dcvclps.counts[,colnames(dcvclps.counts) %in% meta[meta$treat %in% c('DCVC_LPS','Control'),'Sample.ID']]
+dcvclps.LR <- data.frame(geneid=dcvclps.gene$entrezgene_id,
+                        PValue=de.dcvclps_con$pvalue,
+                        logFC=de.dcvclps_con$log2FoldChange,
+                        norm_avg_readcount=rowMeans(dcvclps.counts))
+dcvclps.LR <- dcvclps.LR[!is.na(dcvclps.LR$geneid),]
+dcvclps.LR <- dcvclps.LR[order(dcvclps.LR$PValue),]
+write.table(dcvclps.LR, sep="\t", row.names=FALSE, quote=FALSE, file=file.path(path,"Data/LRpath/dcvclps_con_LR_input.txt"))
+
+#DCVC+LPS v LPS
+dcvclps_lps.gene <- gene_info[match(de.dcvclps_lps$gene, gene_info$hgnc_symbol),]
+dcvclps_lps.counts <- norm.counts[match(rownames(dcvclps_lps.gene),rownames(norm.counts)),]
+dcvclps_lps.counts <- dcvclps_lps.counts[,colnames(dcvclps_lps.counts) %in% meta[meta$treat %in% c('DCVC_LPS','LPS'),'Sample.ID']]
+dcvclps_lps.LR <- data.frame(geneid=dcvclps_lps.gene$entrezgene_id,
+                        PValue=de.dcvclps_lps$pvalue,
+                        logFC=de.dcvclps_lps$log2FoldChange,
+                        norm_avg_readcount=rowMeans(dcvclps_lps.counts))
+dcvclps_lps.LR <- dcvclps_lps.LR[!is.na(dcvclps_lps.LR$geneid),]
+dcvclps_lps.LR <- dcvclps_lps.LR[order(dcvclps_lps.LR$PValue),]
+write.table(dcvclps_lps.LR, sep="\t", row.names=FALSE, quote=FALSE, file=file.path(path,"Data/LRpath/dcvclps_lps_LR_input.txt"))
+
+#DCVC+LPS v DCVC
+dcvclps_dcvc.gene <- gene_info[match(de.dcvclps_dcvc$gene, gene_info$hgnc_symbol),]
+dcvclps_dcvc.counts <- norm.counts[match(rownames(dcvclps_dcvc.gene),rownames(norm.counts)),]
+dcvclps_dcvc.counts <- dcvclps_dcvc.counts[,colnames(dcvclps_dcvc.counts) %in% meta[meta$treat %in% c('DCVC_LPS','DCVC'),'Sample.ID']]
+dcvclps_dcvc.LR <- data.frame(geneid=dcvclps_dcvc.gene$entrezgene_id,
+                        PValue=de.dcvclps_dcvc$pvalue,
+                        logFC=de.dcvclps_dcvc$log2FoldChange,
+                        norm_avg_readcount=rowMeans(dcvclps_dcvc.counts))
+dcvclps_dcvc.LR <- dcvclps_dcvc.LR[!is.na(dcvclps_dcvc.LR$geneid),]
+dcvclps_dcvc.LR <- dcvclps_dcvc.LR[order(dcvclps_dcvc.LR$PValue),]
+write.table(dcvclps_dcvc.LR, sep="\t", row.names=FALSE, quote=FALSE, file=file.path(path,"Data/LRpath/dcvclps_dcvc_LR_input.txt"))
+```
+
+
+OR 0.0001
+OR 0.00000000000000000001
+```{r}
+library(openxlsx)
+library(magrittr)
+
+LR_dcvc <- read.table(file.path(path,"Data/LRpath/LR_dcvc_vs_con.txt",header=T, sep='\t', comment.char="", quote=""))
+
+LR_dcvc <- read.xlsx(file.path(path,"/Data/LRpath/LR_DCVC_VS_con.xlsx"))
+LR_lps <- read.xlsx(file.path(path,"/Data/LRpath/LR_LPS_VS_con.xlsx"))
+LR_dcvclps <- read.xlsx(file.path(path,"/Data/LRpath/LR_DCVCLPS_VS_con.xlsx"))
+LR_dcvclps_dcvc <- read.xlsx(file.path(path,"/Data/LRpath/LR_DCVCLPS_VS_DCVC.xlsx"))
+LR_dcvclps_lps <- read.xlsx(file.path(path,"/Data/LRpath/LR_DCVCLPS_VS_LPS.xlsx"))
+
+process.LR <- function(tab){
+  colnames(tab) <- c('GO term id', 'GO term', 'DROP', 'N genes', 'Coeff', 'Odds Ratio', 'P-Value', 'FDR', 'Direction', 'Genes with P-Value<0.05')
+  tab <- tab[,colnames(tab) != 'DROP']
+  tab
+}
+
+LR_dcvc %<>% process.LR()
+LR_lps %<>% process.LR()
+LR_dcvclps %<>% process.LR()
+LR_dcvclps_dcvc %<>% process.LR()
+LR_dcvclps_lps %<>% process.LR()
+
+write.xlsx(LR_dcvc, file=file.path(path,"Results/PathwayTables/Pathway DCVC vs Control.xlsx"))
+write.xlsx(LR_lps, file=file.path(path,"Results/PathwayTables/Pathway LPS vs Control.xlsx"))
+write.xlsx(LR_dcvclps, file=file.path(path,"Results/PathwayTables/Pathway DCVC+LPS vs Control.xlsx"))
+write.xlsx(LR_dcvclps_dcvc, file=file.path(path,"Results/PathwayTables/Pathway DCVC+LPS vs DCVC.xlsx"))
+write.xlsx(LR_dcvclps_lps, file=file.path(path,"Results/PathwayTables/Pathway DCVC+LPS vs LPS.xlsx"))
+
+
+```
+
+# GSEA
+
+```{r}
+library(fgsea)
+
+de.dcvc_con <- read.csv(file.path(path,'/Results/DE genes DCVC v Control.csv'), header=T)
+de.lps_con <- read.csv(file.path(path,'/Results/DE genes LPS v Control.csv'), header=T)
+de.dcvclps_con <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v Control.csv'), header=T)
+de.dcvclps_lps <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v LPS.csv'), header=T)
+# de.dcvclps_dcvc <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v DCVC.csv'), header=T)
+
+
+myGO = fgsea::gmtPathways(file.path(path,'../c5.go.v7.4.symbols.gmt')) 
+
+do_gsea <- function(res){
+  rank <- qnorm(ifelse(res$pvalue==0, 5.584995e-307/2, res$pvalue/2)) * -sign(res$log2FoldChange)
+  names(rank) <- res$gene
+  rank <- rank[!duplicated(names(rank))]
+  names(rank) <- trimws(names(rank))
+  
+  fgsea <- fgsea(pathways=myGO, stats=rank, minSize=10, eps=0)
+  fgsea <- fgsea[order(fgsea$pval),]
+}
+
+
+fgsea.dcvc <- do_gsea(de.dcvc_con)
+
+fgsea.lps <- do_gsea(de.lps_con)
+
+fgsea.dcvclps_lps <- do_gsea(de.dcvclps_lps)
+
+fgsea.dcvclps_con <- do_gsea(de.dcvclps_con)
+
+
+
+fix_fmt <- function(x){
+  x$leadingEdge <- paste0(x$leadingEdge," ,")
+  x$leadingEdge <- gsub('\", \"'," ,", x$leadingEdge)
+  x$leadingEdge <- gsub('\", \n\"',' ,',x$leadingEdge)
+  x$leadingEdge <- gsub('.") ,"', '', x$leadingEdge)
+
+}
+
+write.csv(data.frame(fgsea.dcvc[,1:7]), file=file.path(path,"Results/PathwayTables/GSEA_dcvc_v_control.csv"), row.names=F)
+write.csv(data.frame(fgsea.lps[,1:7]), file=file.path(path,"Results/PathwayTables/GSEA_lps_v_control.csv"), row.names=F)
+write.csv(data.frame(fgsea.dcvclps_lps[,1:7]), file=file.path(path,"Results/PathwayTables/GSEA_dcvclps_v_lps.csv"), row.names=F)
+write.csv(data.frame(fgsea.dcvclps_con[,1:7]), file=file.path(path,"Results/PathwayTables/GSEA_dcvclps_v_control.csv"), row.names=F)
+```
