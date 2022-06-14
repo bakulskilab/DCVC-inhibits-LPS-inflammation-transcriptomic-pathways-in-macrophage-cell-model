@@ -20,8 +20,8 @@ library(openxlsx)
 
 library(knitr)
 
-path <- "L:/My Drive/Misc/RNAseq/THP1"
-
+path <- "K:/My Drive/Misc/RNAseq/THP1"
+library(here)
 ```
 
 ## Meta data setup and load counts
@@ -229,76 +229,92 @@ shrink.DCVC_LPS <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v Control
 shrink.DCVCl <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v LPS.csv'))
 shrink.LPSd <- read.csv(file.path(path,'/Results/DE genes DCVC+LPS v DCVC.csv'))
 
+#labels of top 5
+DCVC_lab <- shrink.DCVC$gene[1:5]
+
+LPS.p0 <- shrink.LPS[shrink.LPS$pvalue==0,]
+LPS.p0 <- LPS.p0[order(-abs(LPS.p0$log2FoldChange)),]
+LPS_lab <- LPS.p0$gene[1:5]
+
+DCVC_LPS.p0 <- shrink.DCVC_LPS[shrink.DCVC_LPS$pvalue==0,]
+DCVC_LPS.p0 <- DCVC_LPS.p0[order(-abs(DCVC_LPS.p0$log2FoldChange)),]
+DCVC_LPS_lab <- DCVC_LPS.p0$gene[1:5]
+
+DCVCl_lab <- shrink.DCVCl$gene[1:5]
 
 
-EnhancedVolcano(shrink.DCVC, 
+volc.DCVC <- EnhancedVolcano(shrink.DCVC, 
                 title='DCVC vs Control',
                 subtitle='',
                 caption='',
                 subtitleLabSize=1,
                 captionLabSize=1,
-                lab=NA, 
-                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                lab=shrink.DCVC$gene, 
+                drawConnectors = T,
+                selectLab=DCVC_lab,
                 x='log2FoldChange',
                 y='padj',
                 ylab = bquote(~-Log[10]~adjusted~italic(P)),
                 xlim = c(-10,20),
-                ylim = c(0,315),
+                ylim = c(0,330),
                 pCutoff=0.05,
                 FCcutoff=2.5,
                 colAlpha = 1) +
   theme(legend.position = "none")
 
 
-EnhancedVolcano(shrink.LPS, 
+volc.LPS <- EnhancedVolcano(shrink.LPS, 
                 title='LPS vs Control',
                 subtitle='',
                 caption='',
                 subtitleLabSize=1,
                 captionLabSize=1,
-                lab=NA, 
-                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                lab=shrink.LPS$gene, 
+                drawConnectors = T,
+                selectLab=LPS_lab,
                 x='log2FoldChange',
                 y='padj',
                 ylab = bquote(~-Log[10]~adjusted~italic(P)),
                 xlim = c(-10,20),
-                ylim = c(0,315),
+                ylim = c(0,330),
                 pCutoff=0.05,
                 FCcutoff=2.5,
                 colAlpha = 1) +
   theme(legend.position = "none")
 
-EnhancedVolcano(shrink.DCVC_LPS, 
+volc.DCVC_LPS <- EnhancedVolcano(shrink.DCVC_LPS, 
                 title='DCVC+LPS vs Control',
                 subtitle='',
                 caption='',
                 subtitleLabSize=1,
                 captionLabSize=1,
-                lab=NA, 
-                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                lab=shrink.DCVC_LPS$gene, 
+                drawConnectors = T,
+                selectLab=DCVC_LPS_lab,
                 x='log2FoldChange',
                 y='padj',
                 ylab = bquote(~-Log[10]~adjusted~italic(P)),
                 xlim = c(-10,20),
-                ylim = c(0,315),
+                ylim = c(0,330),
                 pCutoff=0.05,
                 FCcutoff=2.5,
                 colAlpha = 1) +
   theme(legend.position = "none")
 
-EnhancedVolcano(shrink.DCVCl, 
+volc.DCVCl <- EnhancedVolcano(shrink.DCVCl, 
                 title='DCVC+LPS vs LPS',
                 subtitle='',
                 caption='',
                 subtitleLabSize=1,
                 captionLabSize=1,
-                lab=NA, 
-                #selectLab=c('LRRN4','BARX1','TF','EPHX2','HOXC9','PITX2','IRX2','HOXA9'),
+                lab=shrink.DCVCl$gene, 
+                drawConnectors = T,
+                selectLab=DCVCl_lab,
                 x='log2FoldChange',
                 y='padj',
                 ylab = bquote(~-Log[10]~adjusted~italic(P)),
                 xlim = c(-10,20),
-                ylim = c(0,315),
+                ylim = c(0,330),
                 pCutoff=0.05,
                 FCcutoff=2.5,
                 colAlpha = 1) +
@@ -321,6 +337,14 @@ EnhancedVolcano(shrink.DCVCl,
 #                 FCcutoff=2.5,
 #                 colAlpha = 1) +
 #   theme(legend.position = "none")
+
+
+ggsave(volc.DCVC, file=file.path(here(),"../Figures/volcano_DCVC_vs_control.tiff"), height=6, width=8)
+ggsave(volc.LPS, file=file.path(here(),"../Figures/volcano_LPS_vs_control.tiff"), height=6, width=8)
+ggsave(volc.DCVC_LPS, file=file.path(here(),"../Figures/volcano_DCVC+LPS_vs_control.tiff"), height=6, width=8)
+ggsave(volc.DCVCl, file=file.path(here(),"../Figures/volcano_LPS_vs_LPS.tiff"), height=6, width=8)
+
+
 
 ```
 
